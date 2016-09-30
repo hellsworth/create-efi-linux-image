@@ -1,0 +1,24 @@
+This efi_img_creator script is a bash script that does the following:
+	- generates a raw disk image
+	- partitions the image with parted: EFI boot partition + root fs partition
+	- creates file systems on the partitions: vfat for the EFI boot, ext4 for the
+	    root fs
+	- installs Debian Jessie onto the root fs (debootstrap)
+	- mounts proc, sysfs, dev
+	- creates /etc/fstab, /etc/network/interfaces
+	- allows root login
+	- chroots into the root fs and installs a good base set of tools, including
+	    the linux image and grub2 for EFI
+	- generates the grub.cfg and makes modifications to ignore the loopback mount
+	    and forces the use of a serial console
+	- uses grub-mkstandalone to generate the grubx64.efi executable 
+	- tries to unmount everything. Unfortunately, you can't unmount dev and so a
+	    reboot is needed to completely unmount the loopback partitions. For this
+	    reason, I highly recommend running this script in a Jessie VM.
+
+This script was developed on a Debian Jessie VM.
+Packages required on a Jessie VM in order to run this script successfully:
+	- qemu
+	- debootstrap
+	- parted
+	- dosfsutils

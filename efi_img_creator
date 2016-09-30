@@ -1,0 +1,189 @@
+#!/bin/bash
+
+##############################
+# This script does the following: 
+#    - create a raw, empty disk image
+#    - partition it with parted (buffer, efi boot partition, root fs)
+#    - make the file systems (none, fat32, ext4:)
+#    - install linux on the root file system
+#    - create and install grubx64.efi on the fat32 partition
+#    - installs all packages desired by team
+##############################
+
+set -e
+
+###############
+#  STEP 0: CREATE IMAGE, PARTITION IT, AND CREATE FILE SYSTEMS
+###############
+
+qemu-img create -f raw LinuxDisk 3G
+sudo parted LinuxDisk mklabel gpt
+sudo parted LinuxDisk mkpart primary 1 2         # 1Mb buffer at begining
+sudo parted LinuxDisk mkpart primary 3 102
+sudo parted LinuxDisk mkpart primary 103 3220    
+sudo parted LinuxDisk set 2 boot on
+sudo parted LinuxDisk print
+
+
+# Load the loop kernel module to be able to loopback mount the partitions we just created
+sudo modprobe loop max_part=15
+sleep 5 # need a little bit of time between loading loop and using it
+sudo losetup -f LinuxDisk
+#sudo modprobe efivarfs  # this module must be loaded on the host system otherwise you won't be able to the grub-install command in the chroot
+
+# `lsblk` should show our loop partitions, loop0p1 , loop0p2, and loop0p3:
+# heather@beemo:/work/Projects$ lsblk
+# NAME      MAJ:MIN RM   SIZE RO TYPE MOUNTPOINT
+# sda         8:0    0 465.8G  0 disk 
+# ├─sda1      8:1    0   4.7G  0 part /boot
+# ├─sda2      8:2    0  23.3G  0 part /
+# ├─sda3      8:3    0    28G  0 part /home
+# └─sda4      8:4    0 409.9G  0 part /work
+# sr0        11:0    1  1024M  0 rom  
+# loop0       7:0    0     3G  0 loop 
+# ├─loop0p1   7:1    0     1M  0 loop 
+# ├─loop0p2   7:2    0    94M  0 loop 
+# └─loop0p3   7:3    0   2.9G  0 loop
+
+# Make the file systems
+sudo mkfs.vfat -F 32 /dev/loop0p2
+sudo mkfs.ext4 /dev/loop0p3
+sudo parted LinuxDisk print
+
+# Just quit if there are no file systems visible on the system
+sys_part_type=`sudo parted LinuxDisk print | grep 3146kB | cut -d "B" -f4 | cut -d " " -f3`
+rootfs_part_type=`sudo parted LinuxDisk print | grep 103MB | cut -d "B" -f4 | cut -d " " -f3`
+if [[ $sys_part_type != fat32 || $rootfs_part_type != ext4 ]] ; then echo "Partition's file systems are incorrect! Check file system type." ; exit 1 ; fi
+
+
+###############
+#  STEP 1: MOUNT ROOT FS AND INSTALL JESSIE
+###############
+
+sudo mkdir rootfs
+sudo mount -o loop /dev/loop0p3 rootfs
+sudo debootstrap jessie rootfs http://ftp.us.debian.org/debian/
+
+
+
+##############  
+# STEP 2: ROOTFS PREPARATION: MOUNTS, CREATE FILES
+###############
+
+# Mount proc/sys/dev. Note that these have to be unmounted before you can unmount rootfs!
+sudo mount proc rootfs/proc -t proc  
+sudo mount sysfs rootfs/sys -t sysfs 
+sudo mount -B /dev rootfs/dev 
+
+
+# Capture the partition and block UUIDs
+partUUID=`sudo blkid -c /dev/null| grep /dev/loop0p2 |sed -n 's/.UUID=\"\([^\"]*\)\".*/\1/p' | cut -d ":" -f2`
+UUID=`sudo blkid -c /dev/null| grep /dev/loop0p3 |sed -n 's/.UUID=\"\([^\"]*\)\".*/\1/p' | cut -d ":" -f2`
+
+# Make the /etc/fstab
+cat <<EOT | sudo tee -a rootfs/etc/fstab
+# /etc/fstab: static file system information.
+#
+# Use 'blkid' to print the universally unique identifier for a
+# device; this may be used with UUID= as a more robust way to name devices
+# that works even if disks are added and removed. See fstab(5).
+#
+# <file system> <mount point>   <type>  <options>       <dump>  <pass>
+# / was on /dev/sdb3 during installation
+UUID=$UUID /               ext4    errors=remount-ro 0       1
+# /boot/efi was on /dev/sdb2 during installation
+UUID=$partUUID  /boot/efi       vfat    defaults        0       1
+/dev/sdb1       /media/usb0     auto    rw,user,noauto  0       0
+/dev/sdb2       /media/usb1     auto    rw,user,noauto  0       0
+/dev/sdb3       /media/usb2     auto    rw,user,noauto  0       0
+EOT
+
+# Make the /etc/interfaces so that a DHCP address can be obtained
+sudo rm -f rootfs/etc/network/interfaces
+cat <<EOQ | sudo tee -a rootfs/etc/network/interfaces
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+# The primary network interface
+allow-hotplug eth0
+iface eth0 inet dhcp
+EOQ
+
+# Needed to allow root login
+echo '    PermitRootLogin yes' | sudo tee -a /etc/ssh/ssh_config
+  
+# Make /boot/efi and mount the efi partition there
+sudo mkdir -p rootfs/boot/efi
+sudo mount -o loop /dev/loop0p2 rootfs/boot/efi
+sudo mkdir -p rootfs/boot/efi/EFI/debian
+ls rootfs/boot/efi/EFI/debian
+
+# Needed for NVM install
+sudo mkdir -p rootfs/usr/local/src/nvm
+
+
+###############
+#  STEP 3: CHROOT INTO FS TO INSTALL STUFF
+###############
+
+sudo chroot rootfs /bin/bash -x <<'EOF'
+  apt-get update
+  apt-get -y --force-yes dist-upgrade
+
+  apt-get -y --force-yes install linux-image-amd64 linux-headers-amd64 ssh sudo vim grub-efi-amd64 grub-efi grub2-common netplug dbus automake libtool debhelper build-essential bzip2 strace tcpdump ethtool parted gdisk htop hdparm rpcbind nfs-common openssl ftp make gcc gdb gdbserver nasm lsof host binutils dnsutils iproute module-init-tools msr-tools telnet time usbutils whois xz-utils console-setup console-setup-linux at dosfstools acpi apt-listchanges   # have to hit enter twice
+
+  sed -i 's/GRUB_CMDLINE_LINUX=""/GRUB_CMDLINE_LINUX="priority=low console=ttyS0 earlycon=uart8250,io,0x3f8,115200 selinux=0 x2apic_phys add_efi_memmap"/' /etc/default/grub
+
+  update-grub
+  chmod +w boot/grub/grub.cfg
+  sed -ri s/"set root=\(loop1\)"/"set root='hd0,gpt3'"/ /boot/grub/grub.cfg
+  sed -i '/loopback/d' /boot/grub/grub.cfg
+  sed -i '/recordfail/i\\n' /boot/grub/grub.cfg
+  sed -i '/recordfail/iserial --unit=0 --speed=9600 --stop=1' /boot/grub/grub.cfg
+  sed -i '/recordfail/iterminal_input serial' /boot/grub/grub.cfg
+  sed -i '/recordfail/iterminal_output serial' /boot/grub/grub.cfg
+  sed -i '/recordfail/i\\n' /boot/grub/grub.cfg
+
+
+  mkdir -p /tmp/myboot/boot/grub
+  echo "configfile (hd0,gpt3)/boot/grub/grub.cfg" >> /tmp/myboot/boot/grub/grub.cfg
+
+  pushd /tmp/myboot > /dev/null
+  grub-mkstandalone --compress=gz -O x86_64-efi -o /boot/efi/EFI/debian/grubx64.efi -d /usr/lib/grub/x86_64-efi --modules="part_gpt part_msdos" --fonts="unicode" --locales="en@quot" --themes="" . 
+  popd > /dev/null
+
+  addgroup --system admin
+  useradd -s /bin/bash -g admin -m -k /dev/null user
+  echo -e "tester\ntester" | passwd user
+  echo -e "tester\ntester" | passwd root
+  adduser user admin
+
+
+  sed -i s/\%sudo/\%admin/ /etc/sudoers
+  hostname=`uname -n | cut -d '.' -f 1`
+  sed -i s/$hostname/tester/ /etc/hostname
+
+  mv /lib/modules/4.6.0-1-amd64/kernel/arch/x86/crypto/ghash-clmulni-intel.ko /lib/modules/4.6.0-1-amd64/kernel/arch/x86/crypto/ghash-clmulni-intel.ko.no_load
+  if [ -e /etc/udev/rules.d/70-persistent-net.rules ] ; then rm /etc/udev/rules.d/70-persistent-net.rules ; fi
+  ln -s /dev/null /etc/udev/rules.d/70-persistent-net.rules
+  systemctl enable serial-getty@ttyS1.service
+  mkdir -p /run/sendsigs.omit.d
+
+
+EOF
+
+
+###############
+#  STEP 4: UNMOUNT ALL MOUNT POINTS
+###############
+sudo umount rootfs/dev
+sudo umount rootfs/sys
+sudo umount rootfs/proc
+sudo umount rootfs/boot/efi
+sudo umount rootfs
+
+
