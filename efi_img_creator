@@ -28,7 +28,7 @@ sudo parted LinuxDisk print
 # Load the loop kernel module to be able to loopback mount the partitions we just created
 sudo modprobe loop max_part=15
 sleep 5 # need a little bit of time between loading loop and using it
-sudo losetup -f LinuxDisk
+sudo losetup -P -f LinuxDisk
 #sudo modprobe efivarfs  # this module must be loaded on the host system otherwise you won't be able to the grub-install command in the chroot
 
 # `lsblk` should show our loop partitions, loop0p1 , loop0p2, and loop0p3:
