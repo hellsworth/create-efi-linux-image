@@ -10,13 +10,14 @@
 #    - installs all packages desired by team
 ##############################
 
+set -x
 set -e
 
 ###############
 #  STEP 0: CREATE IMAGE, PARTITION IT, AND CREATE FILE SYSTEMS
 ###############
 
-qemu-img create -f raw LinuxDisk 3G
+qemu-img create -f raw LinuxDisk 8G
 sudo parted LinuxDisk mklabel gpt
 sudo parted LinuxDisk mkpart primary 1 2         # 1Mb buffer at begining
 sudo parted LinuxDisk mkpart primary 3 102
@@ -60,10 +61,9 @@ if [[ $sys_part_type != fat32 || $rootfs_part_type != ext4 ]] ; then echo "Parti
 #  STEP 1: MOUNT ROOT FS AND INSTALL JESSIE
 ###############
 
-sudo mkdir rootfs
+sudo mkdir -p rootfs
 sudo mount -o loop /dev/loop0p3 rootfs
-sudo debootstrap jessie rootfs http://ftp.us.debian.org/debian/
-
+sudo debootstrap --foreign --arch arm64 buster rootfs http://ftp.us.debian.org/debian/
 
 
 ##############  
@@ -134,7 +134,7 @@ sudo chroot rootfs /bin/bash -x <<'EOF'
   apt-get update
   apt-get -y --force-yes dist-upgrade
 
-  apt-get -y --force-yes install linux-image-amd64 linux-headers-amd64 ssh sudo vim grub-efi-amd64 grub-efi grub2-common netplug dbus automake libtool debhelper build-essential bzip2 strace tcpdump ethtool parted gdisk htop hdparm rpcbind nfs-common openssl ftp make gcc gdb gdbserver nasm lsof host binutils dnsutils iproute module-init-tools msr-tools telnet time usbutils whois xz-utils console-setup console-setup-linux at dosfstools acpi apt-listchanges   # have to hit enter twice
+  apt-get -y --force-yes install linux-image-arm64 linux-headers-arm64 openssh-server openssh-client sudo vim grub-efi-arm64 grub2-common netplug dbus automake libtool debhelper build-essential bzip2 strace tcpdump ethtool parted gdisk htop hdparm rpcbind nfs-common openssl ftp make gcc gdb gdbserver nasm lsof host binutils dnsutils iproute module-init-tools msr-tools telnet time usbutils whois xz-utils console-setup console-setup-linux at dosfstools acpi apt-listchanges   # have to hit enter twice
 
   sed -i 's/GRUB_CMDLINE_LINUX=""/GRUB_CMDLINE_LINUX="priority=low console=ttyS0 earlycon=uart8250,io,0x3f8,115200 selinux=0 x2apic_phys add_efi_memmap"/' /etc/default/grub
 
@@ -158,21 +158,20 @@ sudo chroot rootfs /bin/bash -x <<'EOF'
 
   addgroup --system admin
   useradd -s /bin/bash -g admin -m -k /dev/null user
-  echo -e "tester\ntester" | passwd user
-  echo -e "tester\ntester" | passwd root
+  echo -e "purism\npurism" | passwd purism
+  echo -e "root\nroot" | passwd root
   adduser user admin
 
 
   sed -i s/\%sudo/\%admin/ /etc/sudoers
   hostname=`uname -n | cut -d '.' -f 1`
-  sed -i s/$hostname/tester/ /etc/hostname
+  sed -i s/$hostname/purism/ /etc/hostname
 
-  mv /lib/modules/4.6.0-1-amd64/kernel/arch/x86/crypto/ghash-clmulni-intel.ko /lib/modules/4.6.0-1-amd64/kernel/arch/x86/crypto/ghash-clmulni-intel.ko.no_load
   if [ -e /etc/udev/rules.d/70-persistent-net.rules ] ; then rm /etc/udev/rules.d/70-persistent-net.rules ; fi
   ln -s /dev/null /etc/udev/rules.d/70-persistent-net.rules
   systemctl enable serial-getty@ttyS1.service
   mkdir -p /run/sendsigs.omit.d
-
+  /debootstrap/debootstrap --second-stage
 
 EOF
 
